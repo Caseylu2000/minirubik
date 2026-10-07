@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 enum {
     CUBIES = 7,
@@ -190,16 +191,23 @@ static int valid(const state_t *state)
 
 static uint8_t *build_table(uint8_t *diameter)
 {
-    uint8_t *toward_solved = malloc(STATES);
-    uint32_t *queue = malloc((size_t) STATES * sizeof *queue);
+    // uint8_t *toward_solved = malloc(STATES);
+    // uint32_t *queue = malloc((size_t) STATES * sizeof *queue);
+    uint8_t *heuristic_distance_table = malloc((size_t)ORIENTATIONS * sizeof(uint8_t));  // or we can simply just write malloc(ORIENTATIONS)
+    uint16_t *queue = malloc((size_t)ORIENTATIONS * sizeof(*queue));     
     uint16_t permutation[3][PERMUTATIONS], orientation[3][ORIENTATIONS];
     uint32_t head = 0, tail = 1, level_end = 1;
     state_t state;
-    if (!toward_solved || !queue) {
+    /* if (!toward_solved || !queue) {
         free(toward_solved);
         free(queue);
         return NULL;
+    }*/
+    if(!queue){
+        free(queue);
+        return NULL;
     }
+
     for (uint16_t rank = 0; rank < PERMUTATIONS; ++rank) {
         unrank_state((uint32_t) rank * ORIENTATIONS, &state);
         for (uint8_t face = 0; face < 3; ++face) {
@@ -216,40 +224,158 @@ static uint8_t *build_table(uint8_t *diameter)
                 (uint16_t) (rank_state(&next) % ORIENTATIONS);
         }
     }
-    memset(toward_solved, UINT8_MAX, STATES);
+    // memset(toward_solved, UINT8_MAX, STATES);
+    memset(heuristic_distance_table, UINT8_MAX, ORIENTATIONS);
     queue[0] = 0;
-    toward_solved[0] = 0;
+    // toward_solved[0] = 0;
+    heuristic_distance_table[0] = 0;
     *diameter = 0;
     while (head < tail) {
         if (head == level_end) {
             level_end = tail;
             ++*diameter;
         }
-        uint32_t here = queue[head++];
-        uint16_t p = (uint16_t) (here / ORIENTATIONS);
-        uint16_t o = (uint16_t) (here % ORIENTATIONS);
+        uint16_t here = queue[head++];
+        // uint16_t p = (uint16_t) (here / ORIENTATIONS);
+        // uint16_t o = (uint16_t) (here % ORIENTATIONS);
         for (uint8_t face = 0; face < 3; ++face) {
-            uint16_t next_p = p, next_o = o;
+            // uint16_t next_p = p, next_o = o;
+            uint16_t next = here;
             for (uint8_t turn = 0; turn < 3; ++turn) {
-                next_p = permutation[face][next_p];
-                next_o = orientation[face][next_o];
-                uint32_t there = (uint32_t) next_p * ORIENTATIONS + next_o;
-                if (toward_solved[there] == UINT8_MAX) {
+                // next_p = permutation[face][next_p];
+                next = orientation[face][next];
+                // uint32_t there = (uint32_t) next_p * ORIENTATIONS + next_o;
+                uint16_t there = next;
+                /* if (toward_solved[there] == UINT8_MAX) {
                     uint8_t move = (uint8_t) (face * 3U + turn);
                     toward_solved[there] = inverse_move[move];
+                    queue[tail++] = there;
+                } */
+                if(heuristic_distance_table[there] == UINT8_MAX){
+                    heuristic_distance_table[there] = (uint8_t) *diameter + 1U;
                     queue[tail++] = there;
                 }
             }
         }
     }
-    free(queue);
+    /* free(queue);
     if (tail != STATES) {
         free(toward_solved);
         return NULL;
     }
     return toward_solved;
+    */
+    free(queue);
+    if(tail != ORIENTATIONS){
+        return NULL;
+    }
+    return heuristic_distance_table; // if we use uint8_t array(local variable) to declare heuristic table, we cannot use it to return to parent, which will cause "dangling pointer"(not "out of boundary use": this scenario when access the array with illegal index (greater/smaller than size/zero))
+                                     // or we can declare it using 'static' array[] which will diminish the problem
 }
 
+static uint8_t dfs_cost(state_t state, uint8_t g, uint8_t threshold, uint8_t *heuristic_table, uint8_t *arr){
+    uint32_t rank = rank_state(&state);
+    uint16_t rank_o = rank % ORIENTATIONS;
+    uint8_t h = heuristic_table[rank_o];
+    if(h==0 && rank!=0){         // without this: when g+h == threshold which is not greater than threshold, and this state is with correct orientations but with wrong permutations, which we may get to solved state with at least one more step
+        h = 1;                   // but in this time, we've already spend all of our budget(g == threshold), if we want to find a path get to solved state, we need more budget(higher threshold) ---> change the expected cost from 0 to 1, which will make condition below be true(<=> we shouldnt apply more move if we are out of budget)
+    }
+    if(g+h > threshold){         // cut off the path with expected distance greater than budget. ---> cut off the path with g(P) + h(P) > threshold.
+        return g+h;
+    }
+    /*state_t state_r = apply_move(state, move=0);
+    uint16_t rank_r = rank_state(state_r);
+    if(rank_r == 0U){
+        return 0;
+    }
+    uint8_t h_r = heuristic_table[rank_r];
+    min_nxt_threshold = g + h_r;
+    for(uint8_t move=1; move<9; ++move){
+        state_t next_state = apply_move(state, move);
+        uint16_t next_rank = rank_state(next_state);
+        if(next_rank == 0U){
+            return 0;
+        }
+        uint8_t h_next = heuristic_table[next_rank];
+        uint8_t threshold_next = h_next + g;
+        if(threshold_next < min_nxt_threshold){
+            min_nxt_threshold = threshold_next;
+        }
+    }
+    */
+    uint8_t min_pruned_threshold = UINT8_MAX;
+    for(uint8_t move=0; move<9; ++move){
+        state_t next_state = apply_move(state, move);
+        uint32_t next_state_rank = rank_state(&next_state);
+        if(next_state_rank == 0U){   // check whole part of state(including p and o), not just o, if it's zero then we solved the real rubik's cube!
+            // found;
+            arr[g] = move;
+            return 0;
+        }
+        uint8_t branch_threshold = dfs_cost(next_state, g+1, threshold, heuristic_table, arr);    // write g+1 instead of ++g to prevent updating the g value used by succeeding iteration. Calculate the f-score of this child node, if it noticed that it's f-score(g+h) is greater than threshold , it returns directly. 
+        if(branch_threshold == 0){   // those are not pruned
+            arr[g] = move;
+            return 0;
+        }else{     // those are pruned  ---> minimum f-scroe(g+h) among them determines the next_threshold(if current threshold cannot get to goal)  
+            if(branch_threshold < min_pruned_threshold){
+                min_pruned_threshold = branch_threshold;
+            }
+        }
+        // those are not pruned but cannot get to goal were ignored, they effect nothing.
+    }
+    return min_pruned_threshold;
+}
+
+static bool IDA_star(state_t state, uint8_t *heuristic_table){
+    uint32_t rank = rank_state(&state);
+    if(rank == 0){
+        // print nothing
+        return true;
+    }
+    uint16_t rank_o = rank % ORIENTATIONS;
+    uint8_t h_state = heuristic_table[rank_o];
+    uint8_t g_state = 0;
+    uint8_t threshold = h_state + g_state;
+    while(threshold <= 11){
+        uint8_t path[threshold];
+        /*
+        uint16_t state_R = apply_move(state, move=0);
+        uint16_t rank_R = rank_state(state_R);
+        if(rank_R == 0){
+            // print moves on loop variable i from 0 to g and last move is R
+        }
+        */
+        uint8_t new_threshold = dfs_cost(state, g_state, threshold, heuristic_table, path);
+        if(new_threshold == 0){
+            // found
+            for(int i=0; i < threshold; ++i){
+                printf("%s ", move_names[path[i]]);
+            }
+            printf("\n");
+            return true;
+        }else{
+            threshold = new_threshold; // else: cannot get to goal with that threshold ---> update threshold to chech if that budget is possible.
+        }
+        
+        /*uint16_t real_nxt_rank = rank_R;
+        for(uint8_t move=1 ; move<9 ; ++move){
+            uint16_t next_state = apply_move(state, move)
+            next_rank = rank_state(next_state);
+            if(next_rank == 0U){
+                found = true;
+                // print moves on loop variable i from 0 < g and last move is determined by value of move;
+            }
+            uint8_t temp_thresh = dfs_cost(next_rank, g, threshold, heuristic_table);
+            if(temp_thresh < thresh_min){
+                thresh_min = temp_thresh;
+                real_nxt_rank = next_rank;
+            }
+        }
+        */
+    }
+    return false;
+}
+    
 /*@ requires valid_read_string(input);
     requires \valid(state);
     assigns state->p[0..6], state->o[0..6];
@@ -332,12 +458,19 @@ int main(int argc, char **argv)
             return 1;
         }
         free(table);
+        /*
         if (diameter != 11) {
             fputs("BFS check failed\n", stderr);
             return 1;
         }
+        */
+        if(diameter < 11){
+            printf("Heuristic distance table diameter: %d\n", diameter);
+        }
+        /*
         puts("3674160 states; diameter 11");
         return output_failed();
+        */
     }
     if (argc != 2 || !parse_state(argv[1], &state)) {
         /* C99 5.1.2.2.1 lets argv[0] be null when argc is 0. */
@@ -350,14 +483,26 @@ int main(int argc, char **argv)
         fputs("could not build complete state table\n", stderr);
         return 1;
     }
-    const char *separator = "";
-    for (uint32_t rank = rank_state(&state); rank; rank = rank_state(&state)) {
+    // const char *separator = "";
+    
+    /* for (uint32_t rank = rank_state(&state); rank; rank = rank_state(&state)) {
         uint8_t move = table[rank];
         printf("%s%s", separator, move_names[move]);
         separator = " ";
         state = apply_move(state, move);
     }
+    */
+    bool solved = IDA_star(state, table);
+    if(solved){
+        printf("A move sequence to solved state is printed.\n");
+    }else{
+        printf("Our IDA_star algorithm failed.\n");
+    }
+    free(table);
+    return output_failed();
+    /*
     putchar('\n');
     free(table);
     return output_failed();
+    */
 }
